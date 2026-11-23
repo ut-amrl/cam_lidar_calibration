@@ -2,3 +2,6 @@
 .vscode
 cmake-build-debug
 bags
+
+__pycache__/
+*.pyc

@@ -123,6 +123,8 @@ void CamLidarPanel::optimise()
 
 void CamLidarPanel::updateResult()
 {
+  // The panel owns its node; RViz's executor does not spin it automatically.
+  rclcpp::spin_some(node_);
   // Note: In ROS2, action state tracking is handled differently
   // This is a simplified version - full implementation would track goal handles
   // For now, just enable buttons after a delay

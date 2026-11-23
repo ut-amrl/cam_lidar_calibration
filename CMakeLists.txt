@@ -18,10 +18,14 @@ find_package(eigen3_cmake_module REQUIRED)
 find_package(image_transport REQUIRED)
 find_package(geometry_msgs REQUIRED)
 find_package(pcl_conversions REQUIRED)
-find_package(pcl_ros REQUIRED)
+find_package(PCL REQUIRED)
 find_package(rclpy REQUIRED)
-find_package(rviz_common REQUIRED)
-find_package(rviz_default_plugins REQUIRED)
+option(BUILD_RVIZ_PANEL "Build the optional RViz calibration panel" ON)
+if(BUILD_RVIZ_PANEL)
+  find_package(rviz_common REQUIRED)
+  find_package(rviz_default_plugins REQUIRED)
+  find_package(Qt5 REQUIRED Core Widgets)
+endif()
 find_package(sensor_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
 find_package(message_filters REQUIRED)
@@ -36,17 +40,17 @@ find_package(visualization_msgs REQUIRED)
 find_package(OpenCV REQUIRED)
 find_package(Boost REQUIRED COMPONENTS system)
 find_package(Eigen3 REQUIRED)
-find_package(Qt5 REQUIRED Core Widgets)
 
 ## Setup include directories
 include_directories(
   include
   ${OpenCV_INCLUDE_DIRS}
   ${Eigen3_INCLUDE_DIRS}
+  ${PCL_INCLUDE_DIRS}
 )
 
 add_definitions(-DQT_NO_KEYWORDS)
-set(CMAKE_AUTOMOC ON)
+set(CMAKE_AUTOMOC ${BUILD_RVIZ_PANEL})
 
 # Generate interfaces
 rosidl_generate_interfaces(${PROJECT_NAME}
@@ -69,7 +73,6 @@ set(dependencies
   image_transport
   geometry_msgs
   pcl_conversions
-  pcl_ros
   sensor_msgs
   std_msgs
   message_filters
@@ -90,7 +93,7 @@ add_library(cam_lidar_calibration_core SHARED
 target_link_libraries(cam_lidar_calibration_core
   ${OpenCV_LIBS}
   ${Eigen3_LIBRARIES}
-  Qt5::Widgets
+  ${PCL_LIBRARIES}
 )
 ament_target_dependencies(cam_lidar_calibration_core ${dependencies})
 target_link_libraries(cam_lidar_calibration_core "${cpp_typesupport_target}")
@@ -115,6 +118,7 @@ target_link_libraries(assess_node
 ament_target_dependencies(assess_node ${dependencies})
 target_link_libraries(assess_node "${cpp_typesupport_target}")
 
+if(BUILD_RVIZ_PANEL)
 # RViz panel library (component)
 add_library(cam_lidar_panel SHARED
   src/cam_lidar_panel.cpp
@@ -126,6 +130,10 @@ target_link_libraries(cam_lidar_panel
 ament_target_dependencies(cam_lidar_panel ${dependencies} rviz_common rviz_default_plugins)
 target_link_libraries(cam_lidar_panel "${cpp_typesupport_target}")
 
+  install(TARGETS cam_lidar_panel LIBRARY DESTINATION lib)
+  pluginlib_export_plugin_description_file(rviz_common plugin_description.xml)
+endif()
+
 # Install
 install(TARGETS
   feature_extraction_node
@@ -135,7 +143,6 @@ install(TARGETS
 
 install(TARGETS
   cam_lidar_calibration_core
-  cam_lidar_panel
   ARCHIVE DESTINATION lib
   LIBRARY DESTINATION lib
   RUNTIME DESTINATION bin
@@ -149,7 +156,6 @@ install(FILES plugin_description.xml
   DESTINATION share/${PROJECT_NAME}
 )
 
-pluginlib_export_plugin_description_file(rviz_common plugin_description.xml)
 
 install(DIRECTORY launch/
   DESTINATION share/${PROJECT_NAME}/launch
@@ -168,17 +174,23 @@ install(DIRECTORY data/
 )
 
 install(PROGRAMS
-  scripts/visualise_results.py
   scripts/publish_camera_info.py
+  scripts/assess_jazzy.py
+  scripts/decompress_image.py
+  scripts/calibrate_bag.py
+  scripts/publish_calibration.py
+  scripts/calibration_math.py
   DESTINATION lib/${PROJECT_NAME}
 )
 
 if(BUILD_TESTING)
-  find_package(ament_lint_auto REQUIRED)
-  ament_lint_auto_find_test_dependencies()
+  enable_testing()
+  add_executable(normal_diversity_test tests/normal_diversity_test.cpp)
+  target_link_libraries(normal_diversity_test ${OpenCV_LIBS})
+  add_test(NAME normal_diversity COMMAND normal_diversity_test)
 endif()
 
 ament_export_include_directories(include)
-ament_export_libraries(cam_lidar_calibration_core cam_lidar_panel)
+ament_export_libraries(cam_lidar_calibration_core)
 ament_export_dependencies(${dependencies})
 ament_package()

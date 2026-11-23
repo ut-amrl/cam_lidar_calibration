@@ -16,6 +16,8 @@
  */
 
 #include "cam_lidar_calibration/feature_extractor.h"
+#include "cam_lidar_calibration/normal_diversity.h"
+#include <iomanip>
 
 #include <tf2_eigen/tf2_eigen.hpp>
 #include <pcl/common/intersections.h>
@@ -71,7 +73,10 @@ void statisticalOutlierRemoval(const typename pcl::PointCloud<PointT>::Ptr& clou
   cloud_out->points.clear();
   cloud_out->header = cloud_in->header;
   
-  if (cloud_in->empty()) return;
+  if (cloud_in->size() < 2 || mean_k < 1) {
+    *cloud_out = *cloud_in;
+    return;
+  }
   
   std::vector<double> distances(cloud_in->size());
   
@@ -131,6 +136,8 @@ FeatureExtractor::FeatureExtractor(rclcpp::Node::SharedPtr node)
   num_lowestvoq_ = node_->declare_parameter<int>("num_lowestvoq", 50);
   distance_offset_ = node_->declare_parameter<double>("distance_offset_mm", 0.0);
   loadParams(node_, i_params_);
+  board_width_ = i_params_.board_dimensions.width;
+  board_height_ = i_params_.board_dimensions.height;
   optimiser_ = std::make_shared<Optimiser>(i_params_);
   RCLCPP_INFO(node_->get_logger(), "Input parameters loaded");
 
@@ -164,10 +171,10 @@ FeatureExtractor::FeatureExtractor(rclcpp::Node::SharedPtr node)
   // Synchronizer to get synchronized camera-lidar scan pairs
   image_sub_ = std::make_shared<image_sub_type>(
       node_.get(), i_params_.camera_topic,
-      rclcpp::QoS(queue_rate_).get_rmw_qos_profile());
+      rclcpp::SensorDataQoS().keep_last(queue_rate_).get_rmw_qos_profile());
   pc_sub_ = std::make_shared<pc_sub_type>(
       node_.get(), i_params_.lidar_topic,
-      rclcpp::QoS(queue_rate_).get_rmw_qos_profile());
+      rclcpp::SensorDataQoS().keep_last(queue_rate_).get_rmw_qos_profile());
 
   image_pc_sync_ = std::make_shared<message_filters::Synchronizer<ImageLidarSyncPolicy>>(
       ImageLidarSyncPolicy(queue_rate_), *image_sub_, *pc_sub_);
@@ -189,7 +196,7 @@ FeatureExtractor::FeatureExtractor(rclcpp::Node::SharedPtr node)
   i_params_.cameramat = cv::Mat::zeros(3, 3, CV_64F);
   i_params_.distcoeff = cv::Mat::eye(1, 4, CV_64F);
   camera_info_sub_ = node_->create_subscription<sensor_msgs::msg::CameraInfo>(
-      i_params_.camera_info, 20,
+      i_params_.camera_info, rclcpp::SensorDataQoS(),
       std::bind(&FeatureExtractor::callback_camerainfo, this, std::placeholders::_1));
 
   // Create folder for output if it does not exist
@@ -207,7 +214,7 @@ FeatureExtractor::FeatureExtractor(rclcpp::Node::SharedPtr node)
   }
   else
   {
-    std::string data_dir = ament_index_cpp::get_package_share_directory("cam_lidar_calibration") + "/data";
+    std::string data_dir = node_->declare_parameter<std::string>("output_dir", "calibration_data");
     // Successful capture, store jpeg and pcd file
     if (std::filesystem::create_directories(data_dir))
     {
@@ -221,16 +228,23 @@ FeatureExtractor::FeatureExtractor(rclcpp::Node::SharedPtr node)
 
 void FeatureExtractor::callback_camerainfo(const sensor_msgs::msg::CameraInfo::ConstSharedPtr& msg)
 {
+  if (msg->k[0] <= 0 || msg->k[4] <= 0 ||
+      !((msg->distortion_model == "equidistant" && msg->d.size() == 4) ||
+        (msg->distortion_model == "plumb_bob" && msg->d.size() == 5) ||
+        (msg->distortion_model == "rational_polynomial" && msg->d.size() == 8)))
+  {
+    valid_camera_info_ = false;
+    RCLCPP_ERROR(node_->get_logger(), "Need calibrated CameraInfo: plumb_bob/5, rational_polynomial/8, equidistant/4");
+    return;
+  }
+
   i_params_.cameramat.at<double>(0, 0) = msg->k[0];
   i_params_.cameramat.at<double>(0, 2) = msg->k[2];
   i_params_.cameramat.at<double>(1, 1) = msg->k[4];
   i_params_.cameramat.at<double>(1, 2) = msg->k[5];
   i_params_.cameramat.at<double>(2, 2) = 1;
 
-  i_params_.distcoeff.at<double>(0) = msg->d[0];
-  i_params_.distcoeff.at<double>(1) = msg->d[1];
-  i_params_.distcoeff.at<double>(2) = msg->d[2];
-  i_params_.distcoeff.at<double>(3) = msg->d[3];
+  i_params_.distcoeff = cv::Mat(msg->d).reshape(1, 1).clone();
 
   i_params_.image_size = std::make_pair(msg->width, msg->height);
 
@@ -279,12 +293,8 @@ bool FeatureExtractor::serviceCB(
   publishBoardPointCloud();
   flag = req->operation;  // read flag published by rviz calibration panel
 
-  // Wait for operation to complete
-  while (flag == srv::Optimise::Request::CAPTURE || flag == srv::Optimise::Request::CAPTURE_BCKGRND)
-  {
-    std::this_thread::sleep_for(std::chrono::milliseconds(10));
-  }
-
+  // Acknowledge immediately. Waiting here blocks the default mutually-exclusive
+  // callback group, preventing synchronized sensor callbacks from completing capture.
   res->samples = optimiser_->samples.size();
   return true;
 }
@@ -297,6 +307,8 @@ bool compare_voq(const SetAssess& a, const SetAssess& b)
 void FeatureExtractor::optimise(const std::shared_ptr<rclcpp_action::ServerGoalHandle<action::RunOptimise>> goal_handle)
 {
   RCLCPP_INFO(node_->get_logger(), "Starting FeatureExtractor::optimise");
+  optimiser_->sets.clear();
+  optimiser_->top_sets.clear();
 
   std::string curdatetime_ = getDateTime();
 
@@ -414,6 +426,7 @@ void FeatureExtractor::optimise(const std::shared_ptr<rclcpp_action::ServerGoalH
   if (optimiser_->samples.size() < 3)
   {
     RCLCPP_ERROR(node_->get_logger(), "Less than 3 samples captured or imported.");
+    goal_handle->abort(std::make_shared<action::RunOptimise::Result>());
     return;
   }
 
@@ -501,6 +514,8 @@ void FeatureExtractor::optimise(const std::shared_ptr<rclcpp_action::ServerGoalH
       row++;
     }
 
+    if (!hasNormalDiversity(camera_normals_) || !hasNormalDiversity(lidar_normals_))
+      continue;
     float b_avg = std::accumulate(std::begin(be), std::end(be), 0.0) / be.size();
 
     // Commutative property holds for AA^{-1} = A^{-1}A = I (in the case of a
@@ -539,6 +554,13 @@ void FeatureExtractor::optimise(const std::shared_ptr<rclcpp_action::ServerGoalH
     num_assessed++;
   }
 
+  if (calib_list.empty())
+  {
+    RCLCPP_ERROR(node_->get_logger(), "Insufficient board-normal diversity: add pitch AND yaw variation; moving an upright board alone is insufficient.");
+    goal_handle->abort(std::make_shared<action::RunOptimise::Result>());
+    return;
+  }
+
   // Populate the optimiser sets with the top sets
   for (SetAssess sa : calib_list)
   {
@@ -569,7 +591,7 @@ void FeatureExtractor::optimise(const std::shared_ptr<rclcpp_action::ServerGoalH
     timer_set.tic();
 
     printf(" %2u/%2u ", i + 1, optimiser_->top_sets.size());
-    success = optimiser_->optimise(opt_result, optimiser_->top_sets[i], i_params_.cameramat, i_params_.distcoeff);
+    success = optimiser_->optimise(opt_result, optimiser_->top_sets[i], i_params_.cameramat, i_params_.distcoeff, i_params_.fisheye_model);
 
     // Save extrinsic params to csv for post processing
     if (success)
@@ -1178,25 +1200,7 @@ void FeatureExtractor::extractRegionOfInterest(const sensor_msgs::msg::Image::Co
 
     if (num_of_pc_frames_ == frames_to_capture_)
     {
-      // If it is the first five samples get the mean dimensions of the board
-      if (pc_samples_.size() == 5)
-      {
-        double sum_height = 0.0f;
-        double sum_width = 0.0f;
-
-        for (std::size_t i = 0; i < samples_.size(); i++)
-        {
-          sum_height += samples_[i].heights[0] + samples_[i].heights[1];
-          sum_width += samples_[i].widths[0] + samples_[i].widths[1];
-        }
-
-        board_height_ = sum_height / (samples_.size() * 2);
-        board_width_ = sum_width / (samples_.size() * 2);
-
-        printf("Board height = %6.2fmm \n", board_height_);
-        printf("Board width  = %6.2fmm \n", board_width_);
-      }
-      else  // For every other sample get the dimensions and compare to the first one
+      // Use measured board dimensions; never relearn them from sparse LiDAR fits.
       {
         cam_lidar_calibration::OptimisationSample sample;
         num_samples_++;
@@ -1406,7 +1410,8 @@ void FeatureExtractor::extractRegionOfInterest(const sensor_msgs::msg::Image::Co
         std::string target_pcd_filepath = newdata_folder_ + "/pcd/pose" + std::to_string(num_samples_) + "_target.pcd";
         std::string full_pcd_filepath = newdata_folder_ + "/pcd/pose" + std::to_string(num_samples_) + "_full.pcd";
 
-        assert(cv::imwrite(img_filepath, cv_ptr->image));
+        if (!cv::imwrite(img_filepath, cv_ptr->image))
+          throw std::runtime_error("Failed to save calibration image: " + img_filepath);
         pcl::io::savePCDFileASCII(target_pcd_filepath, *cloud_filtered);
         pcl::io::savePCDFileASCII(full_pcd_filepath, *pointcloud);
         RCLCPP_INFO_STREAM(node_->get_logger(), "Image and pcd file saved");
@@ -1417,17 +1422,20 @@ void FeatureExtractor::extractRegionOfInterest(const sensor_msgs::msg::Image::Co
           std::string pkg_path = ament_index_cpp::get_package_share_directory("cam_lidar_calibration");
 
           std::ofstream camera_info_file;
-          std::string camera_info_path = pkg_path + "/cfg/camera_info.yaml";
+          std::string camera_info_path = newdata_folder_ + "/camera_info.yaml";
           RCLCPP_INFO_STREAM(node_->get_logger(), "Camera_info saved at: " << camera_info_path);
           camera_info_file.open(camera_info_path, std::ios_base::out | std::ios_base::trunc);
           std::string dist_model = (i_params_.fisheye_model) ? "fisheye" : "non-fisheye";
-          camera_info_file << "distortion_model: \"" << dist_model << "\"\n";
-          camera_info_file << "width: " << i_params_.image_size.first << "\n";
-          camera_info_file << "height: " << i_params_.image_size.second << "\n";
-          camera_info_file << "D: [" << i_params_.distcoeff.at<double>(0) << "," << i_params_.distcoeff.at<double>(1)
-                           << "," << i_params_.distcoeff.at<double>(2) << "," << i_params_.distcoeff.at<double>(3)
-                           << "]\n";
-          camera_info_file << "K: [" << i_params_.cameramat.at<double>(0, 0) << ",0.0"
+          camera_info_file << std::setprecision(17);
+          camera_info_file << "/**:\n  ros__parameters:\n";
+          camera_info_file << "    distortion_model: \"" << dist_model << "\"\n";
+          camera_info_file << "    width: " << i_params_.image_size.first << "\n";
+          camera_info_file << "    height: " << i_params_.image_size.second << "\n";
+          camera_info_file << "    D: [";
+          for (int d = 0; d < i_params_.distcoeff.cols; ++d)
+            camera_info_file << (d ? "," : "") << i_params_.distcoeff.at<double>(d);
+          camera_info_file << "]\n";
+          camera_info_file << "    K: [" << i_params_.cameramat.at<double>(0, 0) << ",0.0"
                            << "," << i_params_.cameramat.at<double>(0, 2) << ",0.0"
                            << "," << i_params_.cameramat.at<double>(1, 1) << "," << i_params_.cameramat.at<double>(1, 2)
                            << ",0.0,0.0"
@@ -1576,10 +1584,13 @@ void FeatureExtractor::extractRegionOfInterest(const sensor_msgs::msg::Image::Co
       lengths.push_back(sqrt(pow(c1.x - c3.x, 2) + pow(c1.y - c3.y, 2) + pow(c1.z - c3.z, 2)) * 1000);
       lengths.push_back(sqrt(pow(c1.x - c2.x, 2) + pow(c1.y - c2.y, 2) + pow(c1.z - c2.z, 2)) * 1000);
       std::sort(lengths.begin(), lengths.end());
-      double w0 = lengths[0];
-      double w1 = lengths[1];
-      double h0 = lengths[2];
-      double h1 = lengths[3];
+      // Sorted lengths are short, short, long, long. Match the configured
+      // physical axes: a landscape target's width is the longer dimension.
+      const bool landscape = board_width_ > board_height_;
+      double w0 = lengths[landscape ? 2 : 0];
+      double w1 = lengths[landscape ? 3 : 1];
+      double h0 = lengths[landscape ? 0 : 2];
+      double h1 = lengths[landscape ? 1 : 3];
 
       sample.widths.push_back(w0);
       sample.widths.push_back(w1);
@@ -1604,7 +1615,8 @@ void FeatureExtractor::extractRegionOfInterest(const sensor_msgs::msg::Image::Co
             (abs(h0 - board_height_) > board_height_ * 0.1) | (abs(h1 - board_height_) > board_height_ * 0.1))
         {
           ++num_invalid_samples_;
-          RCLCPP_INFO(node_->get_logger(), "Not a valid sample\n");
+          RCLCPP_INFO(node_->get_logger(), "Invalid board fit: width %.1f/%.1f vs %.1f mm, height %.1f/%.1f vs %.1f mm",
+                      w0, w1, board_width_, h0, h1, board_height_);
 
           if (num_invalid_samples_ > 5)
           {

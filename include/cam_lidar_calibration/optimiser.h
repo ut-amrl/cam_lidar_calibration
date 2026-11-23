@@ -132,7 +132,7 @@ public:
   ~Optimiser() = default;
 
   bool optimise(RotationTranslation& opt_result, std::vector<OptimisationSample>& set, cv::Mat& cameramat,
-                cv::Mat& distcoeff);
+                cv::Mat& distcoeff, bool fisheye_model = false);
 
   void generate_sets(int offset, int k, std::vector<OptimisationSample>& set, std::vector<OptimisationSample>& samples);
 

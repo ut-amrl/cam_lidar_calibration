@@ -52,36 +52,21 @@ int main(int argc, char** argv)
     }
   );
   
-  // Create executor
-  rclcpp::executors::MultiThreadedExecutor executor;
-  executor.add_node(node);
-  
-  // Run in separate thread to allow for visualization loop
-  std::thread executor_thread([&executor]() { executor.spin(); });
-  
-  // Main loop for visualization
-  rclcpp::Rate loop_rate(10);
-  while (rclcpp::ok())
+  // Serialize visualization with capture callbacks; avoid races on sample vectors.
+  auto visualization_timer = node->create_wall_timer(std::chrono::milliseconds(100),
+    [feature_extractor]() { feature_extractor->visualiseSamples(); });
+  rclcpp::TimerBase::SharedPtr import_timer;
+  auto import_client = rclcpp_action::create_client<RunOptimise>(node, "run_optimise");
+  if (feature_extractor->import_samples)
   {
-    if (feature_extractor->import_samples)
-    {
-      using RunOptimiseAction = cam_lidar_calibration::action::RunOptimise;
-      auto action_client = rclcpp_action::create_client<RunOptimiseAction>(node, "run_optimise");
-      
-      if (action_client->wait_for_action_server(std::chrono::seconds(10)))
-      {
-        auto goal_msg = RunOptimiseAction::Goal();
-        action_client->async_send_goal(goal_msg);
-      }
-      break;
-    }
-    
-    feature_extractor->visualiseSamples();
-    loop_rate.sleep();
+    import_timer = node->create_wall_timer(std::chrono::milliseconds(500),
+      [import_client, &import_timer]() {
+        if (!import_client->action_server_is_ready()) return;
+        import_timer->cancel();
+        import_client->async_send_goal(RunOptimise::Goal());
+      });
   }
-  
-  executor.cancel();
-  executor_thread.join();
-  rclcpp::shutdown();
+  rclcpp::spin(node);
+  if (rclcpp::ok()) rclcpp::shutdown();
   return 0;
 }

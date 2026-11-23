@@ -30,14 +30,14 @@ void loadParams(rclcpp::Node::SharedPtr node, initial_parameters_t& i_params_)
   int cb_h = node->declare_parameter<int>("chessboard.pattern_size.height", 6);
   i_params_.chessboard_pattern_size = cv::Size(cb_w, cb_h);
   
-  i_params_.square_length = node->declare_parameter<int>("chessboard.square_length", 100);
+  i_params_.square_length = node->declare_parameter<double>("chessboard.square_length", 83.63);
   
-  int w = node->declare_parameter<int>("chessboard.board_dimension.width", 800);
-  int h = node->declare_parameter<int>("chessboard.board_dimension.height", 600);
-  i_params_.board_dimensions = cv::Size(w, h);
+  double w = node->declare_parameter<double>("chessboard.board_dimension.width", 800.0);
+  double h = node->declare_parameter<double>("chessboard.board_dimension.height", 600.0);
+  i_params_.board_dimensions = cv::Size2d(w, h);
   
-  int e_x = node->declare_parameter<int>("chessboard.translation_error.x", 0);
-  int e_y = node->declare_parameter<int>("chessboard.translation_error.y", 0);
+  double e_x = node->declare_parameter<double>("chessboard.translation_error.x", 0.0);
+  double e_y = node->declare_parameter<double>("chessboard.translation_error.y", 0.0);
   i_params_.cb_translation_error = cv::Point3d(e_x, e_y, 0);
 }
 }  // namespace cam_lidar_calibration

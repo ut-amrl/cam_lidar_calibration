@@ -83,7 +83,7 @@ double Optimiser::normalAlignmentCost(const Rotation& rot)
   // Eq (4) in the original baseline paper
   // We do all the alignment of features in the lidar frame
 
-  double cost;
+  double cost = 0;
   for (const auto& sample : current_set_)
   {
     auto camera_normal_lidar_frame = rot * sample.camera_normal;
@@ -333,8 +333,9 @@ void Optimiser::generate_sets(int offset, int k, std::vector<OptimisationSample>
 }
 
 bool Optimiser::optimise(RotationTranslation& opt_result, std::vector<OptimisationSample>& set, cv::Mat& cameramat,
-                         cv::Mat& distcoeff)
+                         cv::Mat& distcoeff, bool fisheye_model)
 {
+  i_params_.fisheye_model = fisheye_model;
   // Update camera matrix/distortion coeff
   i_params_.cameramat = cameramat;
   i_params_.distcoeff = distcoeff;

@@ -22,10 +22,10 @@
       pattern_size:
         width: 5
         height: 7
-      square_length: 70
+      square_length: 83.63
       board_dimension:
-        width: 620
-        height: 480
+        width: 620.0
+        height: 480.0
       translation_error:
-        x: 2
-        y: 2
+        x: 2.0
+        y: 2.0
