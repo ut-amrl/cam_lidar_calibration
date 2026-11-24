@@ -20,7 +20,7 @@ import yaml
 # Allow both ros2-run installation and direct invocation.
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 from calibration_math import (board_points, fit_ground, intrinsics, make_planes, reprojection_errors,
-                              solve_target, transform, transform_record)
+                              solve_target, transform, transform_record, robot_transforms)
 
 
 def log(message):
@@ -91,7 +91,7 @@ def lookup_transform(edges,destination,source):
 def read_data(args):
     r,meta=reader(args.bag,[args.image_topic,args.info_topic,'/tf_static'])
     topic_types={v['topic_metadata']['name']:v['topic_metadata']['type'] for v in meta['topics_with_message_count']}
-    for topic in (args.image_topic,args.info_topic,args.points_topic):
+    for topic in (args.image_topic,args.points_topic):
         if topic not in topic_types:raise ValueError(f'Topic absent from bag: {topic}')
     if topic_types[args.image_topic] not in ('sensor_msgs/msg/Image','sensor_msgs/msg/CompressedImage'):
         raise ValueError('Image topic must contain Image or CompressedImage')
@@ -122,8 +122,7 @@ def read_data(args):
                         (args.columns-1,args.rows-1),cv2.CALIB_CB_NORMALIZE_IMAGE)
         if found:detections.append(dict(t=stamp(message),elapsed=elapsed,corners=corners.reshape(-1,2),image=im))
         if sampled%25==0:log(f'  sampled {sampled} images; detected {len(detections)} boards')
-    if info is None:raise ValueError('No CameraInfo messages in bag')
-    if size!=(info.width,info.height):raise ValueError('CameraInfo/image resolutions differ')
+    if info is not None and size!=(info.width,info.height):raise ValueError('CameraInfo/image resolutions differ')
     if len(detections)<15:raise ValueError(f'Only {len(detections)} board detections; need at least 15')
     r,_=reader(args.bag,[args.points_topic]);scans=[];ground_scans=[];background=None;lidar_frame=None;last_ground=-99
     background_time=args.background_start if args.background_start is not None else max(0,duration-3)
@@ -167,6 +166,40 @@ def camera_yaml(k,d,size,frame,model):
         projection_matrix=dict(rows=3,cols=4,data=np.c_[k,np.zeros(3)].ravel().tolist()))
 
 
+def select_intrinsics(obj,views,info,size,frame,*,recompute=False,max_error=1.,output=None):
+    """Reuse recorded CameraInfo exactly unless refitting is requested or absent."""
+    recorded=None
+    if info is not None:
+        k=np.array(info.k,dtype=float).reshape(3,3);d=np.array(info.d,dtype=float)
+        if (min(k[0,0],k[1,1])<=0 or not np.isfinite(k).all() or not np.isfinite(d).all()
+            or info.distortion_model not in ('plumb_bob','rational_polynomial')):
+            raise ValueError('Recorded CameraInfo is invalid or uses an unsupported camera model')
+        if info.header.frame_id and info.header.frame_id!=frame:
+            raise ValueError('CameraInfo and image use different frames')
+        recorded=camera_yaml(k,d,size,frame,info.distortion_model)
+        recorded['rectification_matrix']['data']=[float(v)for v in info.r]
+        recorded['projection_matrix']['data']=[float(v)for v in info.p]
+        if output is not None:save_yaml(output/'camera_intrinsics_recorded.yaml',recorded)
+    if recorded is not None and not recompute:
+        errors=reprojection_errors(obj,views,k,d)
+        validation=float(np.sqrt(np.mean(errors**2)))
+        checks=dict(selected='recorded_CameraInfo',recomputed=False,views=len(views),
+                    validation_rms_px=validation,heldout_rms_px=None)
+        active=recorded
+    else:
+        k,d,checks,test=intrinsics(obj,views,size)
+        validation=checks['heldout_rms_px']
+        checks.update(selected='new_fit',recomputed=True,validation_rms_px=validation,
+                      reason='explicit --recompute-intrinsics' if recompute else 'CameraInfo not recorded')
+        active=camera_yaml(k,d,size,frame,'plumb_bob')
+        if recorded is not None:
+            errors=reprojection_errors(obj,test,np.array(info.k).reshape(3,3),np.array(info.d))
+            checks['recorded_heldout_rms_px']=float(np.sqrt(np.mean(errors**2)))
+        if output is not None:save_yaml(output/'camera_intrinsics_candidate.yaml',active)
+    checks['status']='passed' if np.isfinite(validation) and validation<max_error else 'failed'
+    return k,d,active,checks
+
+
 def debug_intrinsics(out,obj,views,k,d,checks):
     (out/'debug/intrinsics').mkdir(parents=True,exist_ok=True)
     rms_values=[]
@@ -195,7 +228,7 @@ def debug_intrinsics(out,obj,views,k,d,checks):
     xy=np.array([[80+i/max(1,len(rms_values)-1)*880,410-e/top*330] for i,e in enumerate(rms_values)],np.int32)
     cv2.polylines(chart,[xy],False,(200,60,20),2)
     cv2.putText(chart,'Intrinsic reprojection RMS per sampled board view (pixels)',(70,35),cv2.FONT_HERSHEY_SIMPLEX,.7,(0,0,0),2)
-    cv2.putText(chart,f'Selected: {checks["selected"]}; new-fit held-out RMS {checks["heldout_rms_px"]:.3f}px',(70,65),cv2.FONT_HERSHEY_SIMPLEX,.55,(0,0,0),1)
+    cv2.putText(chart,f'Selected: {checks["selected"]}; validation RMS {checks["validation_rms_px"]:.3f}px',(70,65),cv2.FONT_HERSHEY_SIMPLEX,.55,(0,0,0),1)
     cv2.putText(chart,'Sampled board view (chronological)',(300,455),cv2.FONT_HERSHEY_SIMPLEX,.6,(0,0,0),1)
     cv2.imwrite(str(out/'debug/intrinsics_error.png'),chart)
 
@@ -226,21 +259,9 @@ def run(args):
     obj,views,info,size,ground_scans,background,prior,metadata=read_data(args)
     report['input']=metadata
     log(f'Found {len(views)} boards; {metadata["paired_detections"]} paired with LiDAR')
-    k,d,checks,test=intrinsics(obj,views,size)
-    candidate=camera_yaml(k,d,size,metadata['camera_frame'],'plumb_bob')
-    save_yaml(out/'camera_intrinsics_candidate.yaml',candidate)
-    recorded_k=np.array(info.k).reshape(3,3);recorded_d=np.array(info.d)
-    if info.distortion_model not in ('plumb_bob','rational_polynomial'):
-        raise ValueError('This CLI supports pinhole plumb_bob/rational_polynomial cameras')
-    old_errors=reprojection_errors(obj,test,recorded_k,recorded_d)
-    checks['recorded_heldout_rms_px']=float(np.sqrt(np.mean(old_errors**2)))
-    choose_candidate=checks['heldout_rms_px']<checks['recorded_heldout_rms_px'] and checks['coverage_fraction']>=.25
-    if not choose_candidate:k,d,model=recorded_k,recorded_d,info.distortion_model
-    else:model='plumb_bob'
-    checks['selected']='new_fit' if choose_candidate else 'recorded_CameraInfo'
-    checks['status']='passed' if checks['heldout_rms_px']<args.max_intrinsics_error else 'failed'
+    k,d,active,checks=select_intrinsics(obj,views,info,size,metadata['camera_frame'],
+        recompute=args.recompute_intrinsics,max_error=args.max_intrinsics_error,output=out)
     report['stages']['intrinsics']=checks
-    active=camera_yaml(k,d,size,metadata['camera_frame'],model)
     save_yaml(out/'camera_intrinsics.yaml',active);bundle['camera_info']=active;bundle['camera_frame']=metadata['camera_frame']
     debug_intrinsics(out,obj,views,k,d,checks)
     try:
@@ -307,6 +328,11 @@ def run(args):
         # Explicitly labeled initializer overlays help diagnose failed alignment.
         if 'planes'in locals():debug_projection(out/'debug/initial_guess_only',planes,initial,k,d)
     report['status']='passed' if all(s['status']=='passed' for s in report['stages'].values()) else 'failed'
+    if report['status']=='passed':
+        payload=robot_transforms(ground,np.linalg.inv(matrix),args.body_height_m,
+            body_frame=args.body_frame,lidar_frame=metadata['lidar_frame'],camera_frame=metadata['camera_frame'],
+            ground_frame=args.ground_frame,footprint_frame=args.footprint_frame)
+        save_yaml(out/'robot_transforms.yaml',payload)
     save_yaml(out/'calibration.yaml',bundle);save_yaml(out/'report.yaml',report)
     log('\n'+yaml.safe_dump(dict(status=report['status'],output=str(out),camera_intrinsics=active,transforms=transforms,checks=report['stages']),sort_keys=False))
     log(f'Calibration {report["status"]}. Results saved to: {out}')
@@ -317,6 +343,10 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('bag',type=Path);p.add_argument('--output',type=Path,
         help='Default: workspace/data/calibration/results/<bag-directory-name>')
+    p.add_argument('--recompute-intrinsics','--recompute_intrinsics',action='store_true',
+        help='Fit and use new intrinsics even when CameraInfo is recorded (default: reuse recorded CameraInfo)')
+    p.add_argument('--body-height-m',type=float,default=.5123518455439847,help='Body-frame height during capture; used for the directly-above LiDAR mount')
+    p.add_argument('--body-frame',default='body');p.add_argument('--footprint-frame',default='base_footprint')
     p.add_argument('--image-topic',default='/camera/rgb/image_raw/compressed');p.add_argument('--info-topic',default='/camera/rgb/camera_info')
     p.add_argument('--points-topic',default='/velodyne_points');p.add_argument('--columns',type=int,default=9);p.add_argument('--rows',type=int,default=6)
     p.add_argument('--square-mm',type=float,default=83.63);p.add_argument('--sample-seconds',type=float,default=2.)

@@ -11,7 +11,7 @@ nobody in front of the sensors. No special recording format or separate bags.
 From the memo workspace, using the existing `memo_ws` container (no new libraries):
 
 ```bash
-scripts/calibrate_bag /data/arthur/bags/calibration/mission_20261107_150933_951207 \
+scripts/calibrate_bag.sh /data/arthur/bags/calibration/mission_20261107_150933_951207 \
   --background-start 181
 ```
 
@@ -23,9 +23,10 @@ Use `--help` to change topics/board dimensions. Output must be empty.
 Background defaults to three seconds before the end; timestamps are seconds
 from bag start. JPEG decoding happens in memory. The input bag is unchanged.
 
-The command fits camera intrinsics, registers LiDAR points to checkerboard
-planes, fits the ground, and prints the selected intrinsics, transforms, and
-errors. Recorded CameraInfo wins if the new fit is worse on held-out views.
+By default, the command uses recorded CameraInfo for camera intrinsics and
+LiDAR–camera calibration. Add `--recompute-intrinsics` to fit new intrinsics;
+if CameraInfo is absent, fitting happens automatically. It registers LiDAR
+points to checkerboard planes, fits the ground, and prints values and errors.
 Without a recorded static mounting chain, initialization assumes a forward
 optical camera roughly 25 cm below the LiDAR; for other mounts supply
 `--initial-extrinsic FILE.yaml` containing a 4×4 **T_camera_lidar** matrix.
@@ -36,7 +37,9 @@ This uses iterative target-plane registration, not ACFR's interactive edge solve
 | File | Contents |
 | --- | --- |
 | `camera_intrinsics.yaml` | Selected ROS camera-calibration-format intrinsics |
-| `camera_intrinsics_candidate.yaml` | Newly fitted intrinsics, including when not selected |
+| `camera_intrinsics_recorded.yaml` | Exact recorded intrinsics, when CameraInfo exists |
+| `camera_intrinsics_candidate.yaml` | Newly fitted intrinsics, only when recomputed |
+| `robot_transforms.yaml` | Fixed TF tree consumed by Ironback description |
 | `lidar_camera.yaml` | Camera pose in LiDAR frame, inverse matrix, fit checks |
 | `lidar_ground.yaml` | LiDAR pose in ground frame and ground fit checks |
 | `calibration.yaml` | CameraInfo and transforms for the publisher |
@@ -60,7 +63,13 @@ scripts/publish_calibration /home/ros/memo_ws/data/calibration/results/mission_2
   --camera-info-topic /calibration/camera_info
 ```
 
-Publishes CameraInfo and `/tf_static` only when explicitly invoked and the report
-passes. Stop conflicting camera/TF publishers before deployment. Ground parent
-is `calibration_ground`; its child is `velodyne`, whose child is `kinect_color`
-for the supplied bag. Nothing is published by the calibration command itself.
+The publisher launches `ironback_description`, which publishes saved CameraInfo
+and the rigid body–LiDAR–camera mounts. Deployment starts Ironback in its own
+tmux pane; the memo planner only subscribes to CameraInfo and TF. Ironback defaults
+to `data/calibration/results/mission_20261107`; override `calibration_dir:=PATH`.
+Spot supplies dynamic `gpe` ground TF; Ironback projects the camera onto it for
+`base_footprint`, following changes in body height/tilt. Offline ground/footprint
+poses are not published as static TFs. The fixed body–LiDAR mount is estimated
+using LiDAR ground height minus `--body-height-m` (default 0.51235185 m from this
+bag), so its accuracy depends on capture-time body height. Nothing is published
+by the calibration command itself.

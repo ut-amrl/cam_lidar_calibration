@@ -132,3 +132,55 @@ class OutputPathTest(unittest.TestCase):
             with patch.object(sys,'argv',['calibrate_bag','/data/mission_example','--output',str(output)]), patch.object(bag,'run',return_value=0) as run:
                 self.assertEqual(bag.main(),0)
                 self.assertEqual(run.call_args.args[0].output,output)
+
+
+class IntrinsicSelectionTest(unittest.TestCase):
+    def info(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(k=[600.,0,640.,0,601.,360.,0,0,1.],d=[.1,.2,.001,.002,.3,.4,.5,.6],
+            r=np.eye(3).ravel(),p=np.arange(12,dtype=float),distortion_model='rational_polynomial',
+            header=SimpleNamespace(frame_id='camera'))
+
+    def test_default_reuses_and_saves_recorded_intrinsics_without_fitting(self):
+        import calibrate_bag as bag
+        from unittest.mock import patch
+        info=self.info()
+        with tempfile.TemporaryDirectory() as folder:
+            with patch.object(bag,'intrinsics') as fit,patch.object(bag,'reprojection_errors',return_value=np.array([.2,.3])):
+                k,d,active,checks=bag.select_intrinsics(None,[{},{}],info,(1280,720),'camera',output=Path(folder))
+            fit.assert_not_called()
+            np.testing.assert_array_equal(k.ravel(),info.k);np.testing.assert_array_equal(d,info.d)
+            self.assertEqual(active['projection_matrix']['data'],list(info.p))
+            self.assertEqual(active['distortion_model'],'rational_polynomial')
+            self.assertEqual(checks['selected'],'recorded_CameraInfo')
+            self.assertFalse(checks['recomputed'])
+            self.assertTrue((Path(folder)/'camera_intrinsics_recorded.yaml').exists())
+            self.assertFalse((Path(folder)/'camera_intrinsics_candidate.yaml').exists())
+
+    def test_flag_refits_and_uses_candidate_even_when_recorded_error_is_lower(self):
+        import calibrate_bag as bag
+        from unittest.mock import patch
+        fitted=np.array([[620.,0,640.],[0,620.,360.],[0,0,1.]])
+        with patch.object(bag,'intrinsics',return_value=(fitted,np.zeros(5),{'heldout_rms_px':.4},[{}])) as fit:
+            with patch.object(bag,'reprojection_errors',return_value=np.array([.1])):
+                k,d,active,checks=bag.select_intrinsics(None,[{}],self.info(),(1280,720),'camera',recompute=True)
+        fit.assert_called_once();np.testing.assert_array_equal(k,fitted)
+        self.assertEqual(checks['selected'],'new_fit');self.assertTrue(checks['recomputed'])
+
+    def test_missing_camerainfo_automatically_fits(self):
+        import calibrate_bag as bag
+        from unittest.mock import patch
+        fitted=np.diag([600.,600.,1.])
+        with patch.object(bag,'intrinsics',return_value=(fitted,np.zeros(5),{'heldout_rms_px':.2},[{}])) as fit:
+            _,_,_,checks=bag.select_intrinsics(None,[{}],None,(1280,720),'camera')
+        fit.assert_called_once();self.assertEqual(checks['reason'],'CameraInfo not recorded')
+
+    def test_generated_payload_footprint_is_beneath_camera(self):
+        ground=math.ground_transform(np.array([.01,.02,1.]),.875)
+        camera=np.eye(4);camera[:3,3]=[.45,-.04,-.19]
+        doc=math.robot_transforms(ground,camera,.512)
+        records={entry['child_frame']:entry for entry in doc['transforms']}
+        footprint=ground@np.array(records['base_footprint']['matrix'])
+        np.testing.assert_allclose(footprint[:2,3],(ground@camera)[:2,3])
+        self.assertAlmostEqual(footprint[2,3],0.)
+        self.assertAlmostEqual(records['velodyne']['translation']['z'],.363)

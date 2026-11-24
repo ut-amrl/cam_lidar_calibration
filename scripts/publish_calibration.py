@@ -37,39 +37,12 @@ def main():
     if args.rate<=0:parser.error('Rate must be positive')
     if args.dry_run:
         print(yaml.safe_dump(bundle,sort_keys=False));return 0
-    import rclpy
-    from rclpy.node import Node
-    from rclpy.qos import QoSProfile,DurabilityPolicy,ReliabilityPolicy
-    from sensor_msgs.msg import CameraInfo
-    from geometry_msgs.msg import TransformStamped
-    from tf2_ros import StaticTransformBroadcaster
-    rclpy.init();node=Node('saved_calibration_publisher')
-    qos=QoSProfile(depth=1,durability=DurabilityPolicy.TRANSIENT_LOCAL,reliability=ReliabilityPolicy.RELIABLE)
-    publisher=node.create_publisher(CameraInfo,args.camera_info_topic,qos)
-    broadcaster=StaticTransformBroadcaster(node)
-    camera=bundle['camera_info'];message=CameraInfo()
-    message.header.frame_id=bundle['camera_frame']
-    message.width=camera['image_width'];message.height=camera['image_height'];message.distortion_model=camera['distortion_model']
-    message.k=camera['camera_matrix']['data'];message.d=camera['distortion_coefficients']['data']
-    message.r=camera['rectification_matrix']['data'];message.p=camera['projection_matrix']['data']
-    transforms=[]
-    for entry in bundle['transforms']:
-        tf=TransformStamped();tf.header.frame_id=entry['parent_frame'];tf.child_frame_id=entry['child_frame']
-        tf.header.stamp=node.get_clock().now().to_msg()
-        for key in ('x','y','z'):setattr(tf.transform.translation,key,float(entry['translation'][key]))
-        for key in ('x','y','z','w'):setattr(tf.transform.rotation,key,float(entry['rotation'][key]))
-        transforms.append(tf)
-    broadcaster.sendTransform(transforms)
-    def publish():
-        message.header.stamp=node.get_clock().now().to_msg();publisher.publish(message)
-    publish();timer=node.create_timer(1/args.rate,publish)
-    node.get_logger().info(f'Publishing {args.camera_info_topic} and {len(transforms)} static transforms; stop conflicting TF publishers first')
-    try:rclpy.spin(node)
-    except KeyboardInterrupt:pass
-    finally:
-        timer.cancel();node.destroy_node()
-        if rclpy.ok():rclpy.shutdown()
-    return 0
+    import os
+    transforms_file=(args.directory/'robot_transforms.yaml').resolve()
+    if not transforms_file.is_file():raise ValueError('Missing robot_transforms.yaml; rerun bag calibration')
+    os.execvp('ros2',['ros2','launch','ironback_description','description.launch.py',
+                     f'calibration_file:={transforms_file}',f'camera_info_topic:={args.camera_info_topic}',
+                     f'camera_info_rate_hz:={args.rate}'])
 
 
 if __name__=='__main__':

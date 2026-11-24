@@ -197,3 +197,22 @@ def transform_record(matrix,parent,child):
         translation=dict(zip(('x','y','z'),matrix[:3,3].tolist())),
         rotation=dict(zip(('x','y','z','w'),Rotation.from_matrix(matrix[:3,:3]).as_quat().tolist())),
         rpy_rad=Rotation.from_matrix(matrix[:3,:3]).as_euler('xyz').tolist(),matrix=matrix.tolist())
+
+
+def robot_transforms(ground,camera,body_height,*,body_frame='body',lidar_frame='velodyne',
+                     camera_frame='kinect_color',ground_frame='calibration_ground',footprint_frame='base_footprint'):
+    """Fixed payload tree for Ironback's robot_state_publisher.
+
+    Body/LiDAR axes are parallel and LiDAR is directly above body. The footprint
+    is ground aligned and directly below the camera along the ground normal.
+    """
+    height=float(ground[2,3])
+    if not 0<float(body_height)<height:raise ValueError('body-height-m must be between ground and LiDAR')
+    mount=np.eye(4);mount[2,3]=height-body_height
+    ground_camera=ground@camera
+    ground_footprint=np.eye(4);ground_footprint[:2,3]=ground_camera[:2,3]
+    return dict(schema_version=1,camera_frame=camera_frame,body_height_m=body_height,transforms=[
+        transform_record(mount,body_frame,lidar_frame),
+        transform_record(camera,lidar_frame,camera_frame),
+        transform_record(np.linalg.inv(ground),lidar_frame,ground_frame),
+        transform_record(np.linalg.inv(ground)@ground_footprint,lidar_frame,footprint_frame)])
