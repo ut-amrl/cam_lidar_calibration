@@ -8,10 +8,12 @@ nobody in front of the sensors. No special recording format or separate bags.
 
 ## Run
 
-From the memo workspace, using the existing `memo_ws` container (no new libraries):
+Use the single workspace entry point, `scripts/calibration`. It runs locally in
+ROS 2 Jazzy or uses the existing `memo_ws` container (override with
+`CALIBRATION_CONTAINER`; no new libraries):
 
 ```bash
-scripts/calibrate_bag.sh /data/arthur/bags/calibration/mission_20261107_150933_951207 \
+scripts/calibration /data/arthur/bags/calibration/mission_20261107_150933_951207 \
   --background-start 181
 ```
 
@@ -19,7 +21,9 @@ Defaults: `/camera/rgb/image_raw/compressed`, `/camera/rgb/camera_info`,
 `/velodyne_points`; **9 × 6 squares, 83.63 mm each**, with no outside border.
 Output defaults to `data/calibration/results/<bag-directory-name>` in the memo
 workspace; its full path is printed at completion. Override with `--output PATH`.
-Use `--help` to change topics/board dimensions. Output must be empty.
+Use `scripts/calibration bag --help` for topics, board dimensions, and all
+calibration options. `scripts/calibration --help` summarizes both modes. Output must
+be empty.
 Background defaults to three seconds before the end; timestamps are seconds
 from bag start. JPEG decoding happens in memory. The input bag is unchanged.
 
@@ -58,8 +62,8 @@ Held-out residuals are consistency checks, not independent ground-truth accuracy
 ## Publish later
 
 ```bash
-scripts/publish_calibration /home/ros/memo_ws/data/calibration/results/mission_20261107 --dry-run
-scripts/publish_calibration /home/ros/memo_ws/data/calibration/results/mission_20261107 \
+scripts/calibration publish /home/ros/memo_ws/data/calibration/results/mission_20261107 --dry-run
+scripts/calibration publish /home/ros/memo_ws/data/calibration/results/mission_20261107 \
   --camera-info-topic /calibration/camera_info
 ```
 
